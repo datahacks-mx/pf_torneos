@@ -1,0 +1,249 @@
+---
+title: "Calendario de Torneos 2026 — PointFight Club"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: cosmo
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+# Paquetes requeridos (instala si hace falta)
+pkgs <- c("readxl","dplyr","lubridate","DT","crosstalk","htmlwidgets","htmltools","janitor","stringr")
+to_install <- pkgs[!pkgs %in% rownames(installed.packages())]
+if(length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+
+library(readxl)
+library(dplyr)
+library(lubridate)
+library(DT)
+library(crosstalk)
+library(htmlwidgets)
+library(htmltools)
+library(janitor)
+library(stringr)
+
+# Ajusta ruta si mueves el archivo
+path_excel <- "data/Calendario Torneos 2026.xlsx"
+
+# Placeholder de póster (SVG embebido; self-contained para RPubs)
+poster_placeholder <- paste0(
+  "data:image/svg+xml;utf8,",
+  URLencode('<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1100">
+    <rect width="100%" height="100%" fill="#f2f2f2"/>
+    <rect x="40" y="40" width="720" height="1020" fill="#ffffff" stroke="#d0d0d0" stroke-width="4"/>
+    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle"
+      font-family="Arial" font-size="42" fill="#888888">Sin póster</text>
+    <text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle"
+      font-family="Arial" font-size="20" fill="#aaaaaa">Agrega una URL en la columna Poster</text>
+  </svg>', reserved = TRUE)
+)
+
+# Si vas a hospedar posters en una carpeta pública (ej. GitHub raw), puedes usar:
+# poster_base_url <- "https://TU_DOMINIO/tu_carpeta_posters/"
+# y generar URLs por slug. En este MVP, la app usa directamente la columna Poster (si existe).
+```
+
+Column {data-width=320}
+-------------------------------------
+
+### Filtros
+
+```{r}
+# Cargar y limpiar (la hoja trae 3 filas de encabezados decorativos)
+raw <- read_excel(path_excel, sheet = "base", skip = 3) |>
+  janitor::clean_names()
+
+# raw trae una columna vacía "x__1" o "unnamed_0" dependiendo de la lectura
+raw <- raw |>
+  select(where(~!all(is.na(.x))))  # elimina columnas completamente vacías
+
+# Normalizar nombres esperados (por si cambian mínimamente)
+# Columnas esperadas: fecha, nombre, promotor, sede, entidad, municipio, liga_asociacion, direccion, mes
+df <- raw |>
+  mutate(
+    fecha = as.Date(fecha),
+    mes = if("mes" %in% names(raw)) as.integer(mes) else month(fecha)
+  )
+
+# Clave estable y única para Crosstalk/SharedData.
+# Importante: NO usar row_number() fuera de mutate()/filter()/group_by(),
+# porque dispara el error "n() must only be used inside data-masking verbs".
+df$.key <- sprintf("row_%05d", seq_len(nrow(df)))
+
+# Si no existe columna Poster, créala vacía.
+# Recomendación: llenar con URL directa (https://...) a .jpg/.png/.webp
+if(!("poster" %in% names(df))) df$poster <- NA_character_
+
+# Mes en texto (ES) sin depender de locale
+meses_es <- c("Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre")
+df <- df |>
+  mutate(
+    mes_nombre = factor(meses_es[pmax(1, pmin(12, mes))], levels = meses_es),
+    liga_asociacion = if("liga_asociacion" %in% names(df)) liga_asociacion else NA_character_
+  )
+
+# Compartir datos para filtros client-side (funciona en RPubs)
+# Construir una tabla "segura" (nombres sin espacios) para Crosstalk/DT.
+# Nota: NO apliques dplyr::select() directamente a 'sd' (SharedData); prepara el data.frame antes.
+tab_df <- df |>
+  transmute(
+    fecha,
+    mes_nombre,
+    nombre,
+    promotor,
+    sede,
+    entidad,
+    municipio,
+    liga_asociacion,
+    direccion,
+    poster,
+    .key
+  )
+
+key_vec <- tab_df$.key
+tab_df$.key <- NULL
+
+sd <- SharedData$new(tab_df, key = key_vec, group = "torneos")
+
+
+# Filtros (sin Shiny; operan en el navegador)
+# Layout horizontal (2x2) para ahorrar espacio.
+tagList(
+  div(
+    class = "row",
+    style = "margin-bottom:10px;",
+    div(class = "col-sm-6", filter_select("f_mes", "Mes", sd, ~mes_nombre, multiple = TRUE)),
+    div(class = "col-sm-6", filter_select("f_ent", "Entidad", sd, ~entidad, multiple = TRUE))
+  ),
+  div(
+    class = "row",
+    div(class = "col-sm-6", filter_select("f_liga", "Liga/Asociación", sd, ~liga_asociacion, multiple = TRUE)),
+    div(class = "col-sm-6", filter_select("f_mun", "Municipio", sd, ~municipio, multiple = TRUE))
+  )
+)
+```
+
+Column {data-width=680}
+-------------------------------------
+
+### Calendario + Póster
+
+```{r}
+# Tabla a mostrar: incluye poster al final, pero se oculta visualmente.
+# Encabezados amigables (los nombres internos permanecen "seguros" para filtros)
+col_headers <- c("Fecha","Mes","Torneo","Promotor","Sede","Entidad","Municipio","Liga/Asociación","Dirección","Poster")
+
+
+
+# Índices (0-based) para JavaScript (por el orden en 'sd')
+idx <- list(
+  fecha = 0, mes = 1, torneo = 2, promotor = 3, sede = 4,
+  entidad = 5, municipio = 6, liga = 7, direccion = 8, poster = 9
+)
+
+# Panel de detalle (imagen + metadatos)
+detail_panel <- tags$div(
+  style = "display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;",
+  tags$div(
+    style="flex: 0 0 300px; max-width:300px;",
+    tags$img(
+      id="poster_img",
+      src=poster_placeholder,
+      style="width:100%; height:auto; border:1px solid #ddd; border-radius:8px; background:#fff;"
+    )
+  ),
+  tags$div(
+    style="flex: 1 1 320px; min-width:320px;",
+    tags$div(id="poster_meta", style="padding:6px 2px;")
+  )
+)
+
+# Tabla DT (selección por fila)
+dt <- datatable(
+  sd,
+  colnames = col_headers,
+  rownames = FALSE,
+  selection = list(mode = "single", target = "row"),
+  options = list(
+    pageLength = 12,
+    scrollX = TRUE,
+    autoWidth = TRUE,
+    columnDefs = list(
+      list(targets = idx$poster, visible = FALSE) # ocultar Poster
+    )
+  )
+)
+
+# JavaScript para: al dar clic en una fila -> actualizar imagen + detalle
+js <- "
+function(el, x, data){
+  function esc(s){
+    if(s === null || s === undefined) return '';
+    return String(s)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/\"/g,'&quot;')
+      .replace(/\\'/g,'&#39;');
+  }
+  function valOrDash(v){
+    v = (v === null || v === undefined) ? '' : String(v);
+    v = v.trim();
+    return v === '' || v === 'NA' ? '—' : v;
+  }
+  function setDetail(row){
+    if(!row) return;
+    var poster = row[data.idx.poster];
+    poster = (poster === null || poster === undefined) ? '' : String(poster).trim();
+    var src = (poster && poster !== 'NA') ? poster : data.placeholder;
+
+    var title = esc(row[data.idx.torneo] || '');
+    var html = '';
+    html += '<h3 style=\"margin:0 0 8px 0;\">' + title + '</h3>';
+    html += '<div><strong>Fecha:</strong> ' + esc(valOrDash(row[data.idx.fecha])) + '</div>';
+    html += '<div><strong>Mes:</strong> ' + esc(valOrDash(row[data.idx.mes])) + '</div>';
+    html += '<div><strong>Promotor:</strong> ' + esc(valOrDash(row[data.idx.promotor])) + '</div>';
+    html += '<div><strong>Sede:</strong> ' + esc(valOrDash(row[data.idx.sede])) + '</div>';
+    html += '<div><strong>Entidad:</strong> ' + esc(valOrDash(row[data.idx.entidad])) + '</div>';
+    html += '<div><strong>Municipio:</strong> ' + esc(valOrDash(row[data.idx.municipio])) + '</div>';
+    html += '<div><strong>Liga/Asociación:</strong> ' + esc(valOrDash(row[data.idx.liga])) + '</div>';
+    html += '<div style=\"margin-top:8px;\"><strong>Dirección:</strong><br>' + esc(valOrDash(row[data.idx.direccion])) + '</div>';
+
+    var img = document.getElementById('poster_img');
+    if(img) img.src = src;
+
+    var meta = document.getElementById('poster_meta');
+    if(meta) meta.innerHTML = html;
+  }
+
+  var tbl = $(el).find('table').DataTable();
+
+  // Click en fila
+  $(el).find('tbody').on('click', 'tr', function(){
+    var row = tbl.row(this).data();
+    setDetail(row);
+  });
+
+  // Inicial: primera fila visible
+  function initFirst(){
+    var row = tbl.rows({search:'applied'}).data()[0];
+    if(row) setDetail(row);
+  }
+
+  // Re-inicializar al filtrar/redibujar
+  tbl.on('draw', function(){ initFirst(); });
+
+  // Primer render
+  initFirst();
+}
+"
+
+# Render: panel + tabla (en un solo bloque)
+browsable(tagList(
+  detail_panel,
+  tags$hr(),
+  onRender(dt, js, data = list(idx = idx, placeholder = poster_placeholder))
+))
+```
